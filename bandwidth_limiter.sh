@@ -70,7 +70,7 @@ kill_old_instance() {
 
 cleanup_all() {
     tc qdisc del dev "$IFACE" root 2>/dev/null
-    rm -f "$STATE_DIR"/* "$PID_FILE"
+    rm -rf "${STATE_DIR:?}"/* "$PID_FILE"
     mkdir -p "$LIMIT_DIR" "$VIOLATIONS_DIR" "$BYTES_DIR"
 }
 
@@ -249,7 +249,6 @@ SYNC_INTERVAL=300
 last_sync=0
 
 while true; do
-    local now
     now=$(date +%s)
 
     if (( now - last_sync >= SYNC_INTERVAL )); then
@@ -257,7 +256,6 @@ while true; do
         last_sync=$now
     fi
 
-    local ports
     ports=$(get_ports_from_db)
     if [[ -z "$ports" ]]; then
         log "No ports from DB, retrying in 60s"
@@ -266,14 +264,11 @@ while true; do
         continue
     fi
 
-    local port
     while IFS= read -r port; do
         [[ -z "$port" ]] && continue
 
-        local hex_port
         hex_port=$(port_to_hex "$port")
 
-        local class_exists
         class_exists=$(tc class show dev "$IFACE" parent 1: 2>/dev/null | grep "class 1:${hex_port}")
         if [[ -z "$class_exists" ]]; then
             add_port_class "$port" "$BASE_RATE"
@@ -281,43 +276,39 @@ while true; do
         fi
 
         if [[ -f "$LIMIT_DIR/$port" ]]; then
-            local limit_time
             limit_time=$(cat "$LIMIT_DIR/$port")
-            local elapsed=$((now - limit_time))
-            if (( elapsed >= LIMIT_DURATION )); then
+            limit_elapsed=$((now - limit_time))
+            if (( limit_elapsed >= LIMIT_DURATION )); then
                 set_port_rate "$port" "$BASE_RATE"
                 rm -f "$LIMIT_DIR/$port" "$VIOLATIONS_DIR/$port" "$BYTES_DIR/$port"
                 log "port ${port}: RESTORED to ${BASE_RATE}"
             else
-                local remaining=$(( (LIMIT_DURATION - elapsed) / 60 ))
+                remaining=$(( (LIMIT_DURATION - limit_elapsed) / 60 ))
                 log "port ${port}: LIMITED ${LIMIT_RATE}, ${remaining}min remaining"
                 continue
             fi
         fi
 
-        local current_bytes
         current_bytes=$(get_port_sent_bytes "$port")
-        local bytes_file="$BYTES_DIR/$port"
+        bytes_file="$BYTES_DIR/$port"
 
         if [[ ! -f "$bytes_file" ]]; then
             echo "${now} ${current_bytes}" > "$bytes_file"
             continue
         fi
 
-        local prev_ts prev_bytes
         read -r prev_ts prev_bytes < "$bytes_file"
         echo "${now} ${current_bytes}" > "$bytes_file"
 
-        local elapsed=$((now - prev_ts))
+        elapsed=$((now - prev_ts))
         (( elapsed < 1 )) && elapsed=1
-        local diff=$((current_bytes - prev_bytes))
+        diff=$((current_bytes - prev_bytes))
         (( diff < 0 )) && diff=0
 
-        local mbps=$((diff * 8 / elapsed / 1000000))
+        mbps=$((diff * 8 / elapsed / 1000000))
 
         if (( mbps >= BANDWIDTH_THRESHOLD )); then
             record_violation "$port"
-            local vcount
             vcount=$(get_violation_count "$port")
             log "port ${port}: ${mbps}Mbps >= ${BANDWIDTH_THRESHOLD}Mbps | violations: ${vcount}/${TRIGGER_COUNT}"
             if (( vcount >= TRIGGER_COUNT )); then
@@ -327,7 +318,6 @@ while true; do
                 log "port ${port}: LIMITED to ${LIMIT_RATE} for $((LIMIT_DURATION / 60))min"
             fi
         else
-            local vcount
             vcount=$(get_violation_count "$port")
             if (( vcount > 0 )); then
                 log "port ${port}: ${mbps}Mbps | violations: ${vcount}/${TRIGGER_COUNT}"
