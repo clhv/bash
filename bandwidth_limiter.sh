@@ -101,25 +101,31 @@ add_port_filter() {
     local port=$1
     local hex_port
     hex_port=$(port_to_hex "$port")
-    local filter_handle
-    filter_handle=$(printf '0x%x' "$port")
-    tc filter add dev "$IFACE" parent 1: protocol ip prio 1 handle ${filter_handle} u32 \
+    tc filter add dev "$IFACE" parent 1: protocol ip prio 1 u32 \
         match ip sport "$port" 0xffff flowid 1:${hex_port} 2>/dev/null
-}
-
-remove_port_filter() {
-    local port=$1
-    local filter_handle
-    filter_handle=$(printf '0x%x' "$port")
-    tc filter del dev "$IFACE" parent 1: protocol ip prio 1 handle ${filter_handle} u32 2>/dev/null
 }
 
 remove_port_class() {
     local port=$1
     local hex_port
     hex_port=$(port_to_hex "$port")
-    remove_port_filter "$port"
     tc class del dev "$IFACE" parent 1: classid 1:${hex_port} 2>/dev/null
+}
+
+rebuild_all_filters() {
+    local ports
+    ports=$(get_ports_from_db)
+    tc filter del dev "$IFACE" parent 1: 2>/dev/null
+    local p hex_p
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        hex_p=$(port_to_hex "$p")
+        tc filter add dev "$IFACE" parent 1: protocol ip prio 1 u32 \
+            match ip sport "$p" 0xffff flowid 1:${hex_p} 2>/dev/null
+    done <<< "$ports"
+    local cnt
+    cnt=$(tc filter show dev "$IFACE" parent 1: 2>/dev/null | grep -c 'match')
+    log "Filters rebuilt: ${cnt}"
 }
 
 set_port_rate() {
@@ -140,7 +146,7 @@ get_port_sent_bytes() {
 }
 
 get_current_class_ports() {
-    tc class show dev "$IFACE" parent 1: 2>/dev/null | grep -oP 'class 1:\K[0-9a-fA-F]+' | while read -r hex; do
+    tc class show dev "$IFACE" parent 1: 2>/dev/null | grep -oP ' 1:\K[0-9a-fA-F]+' | while read -r hex; do
         local dec=$((16#$hex))
         (( dec != DEFAULT_CLASS_ID )) && echo "$dec"
     done | sort -un
@@ -178,11 +184,16 @@ sync_ports() {
 
     for p in "${!current_map[@]}"; do
         if [[ -z "${desired_map[$p]}" ]]; then
-            log "REMOVE port $p: class + filter"
+            log "REMOVE port $p: class"
             remove_port_class "$p"
             rm -f "$LIMIT_DIR/$p" "$VIOLATIONS_DIR/$p" "$BYTES_DIR/$p"
+            need_rebuild=1
         fi
     done
+
+    if [[ "${need_rebuild:-0}" -eq 1 ]]; then
+        rebuild_all_filters
+    fi
 }
 
 record_violation() {
@@ -269,7 +280,7 @@ while true; do
 
         hex_port=$(port_to_hex "$port")
 
-        class_exists=$(tc class show dev "$IFACE" parent 1: 2>/dev/null | grep "class 1:${hex_port}")
+        class_exists=$(tc class show dev "$IFACE" parent 1: 2>/dev/null | grep "1:${hex_port} ")
         if [[ -z "$class_exists" ]]; then
             add_port_class "$port" "$BASE_RATE"
             add_port_filter "$port"
@@ -326,6 +337,7 @@ while true; do
 
     done <<< "$ports"
 
+    log "cycle done: $(wc -l <<< "$ports") ports, $(tc filter show dev "$IFACE" parent 1: 2>/dev/null | grep -c 'match') filters"
     rotate_log
     sleep 60
 done
